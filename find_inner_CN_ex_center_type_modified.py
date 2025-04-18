@@ -16,7 +16,32 @@ from scipy.spatial import Delaunay
 from collections import defaultdict
 import multiprocessing
 
+def plot_convex_hull(points, central_atom=None):
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+    points = np.array(points)
+    hull = ConvexHull(points)
+
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    for simplex in hull.simplices:
+        triangle = points[simplex]
+        poly = Poly3DCollection([triangle], alpha=0.3, edgecolor='k')
+        poly.set_facecolor('skyblue')
+        ax.add_collection3d(poly)
+
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], color="blue", label="neighbors")
+
+    if central_atom is not None:
+        ax.scatter(*central_atom, color="red", s=100, label="central atom")
+
+    ax.set_title("Convex Hull of Polyhedron")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+from numpy.linalg import norm
 from re import match
 from cifkit.coordination.geometry import compute_polyhedron_metrics
 
@@ -78,6 +103,45 @@ def polyhedron_metrics(center, points_wd):
         distances = [round(float(d), 4) for d in distances]
          
     return distances, angles
+
+def compute_largest_face_area(coords, hull, angle_tol=1e-2):
+    def triangle_area(a, b, c):
+        return 0.5 * norm(np.cross(b - a, c - a))
+
+    def unit_normal(a, b, c):
+        normal = np.cross(b - a, c - a)
+        return normal / norm(normal)
+
+    coords = np.array(coords)
+    normals = []
+    simplices_by_normal = defaultdict(list)
+
+    for simplex in hull.simplices:
+        a, b, c = coords[simplex]
+        normal = unit_normal(a, b, c)
+        # Round to avoid floating point drift, group by direction
+        normal_key = tuple(np.round(normal / angle_tol ).astype(int))
+        normals.append(normal_key)
+        simplices_by_normal[normal_key].append(simplex)
+
+    all_face_areas = []
+    largest_area = 0.0
+    face_types = []
+
+    for face_triangles in simplices_by_normal.values():
+        face_area = 0.0
+        for tri in face_triangles:
+            a, b, c = coords[tri]
+            face_area += triangle_area(a, b, c)
+        all_face_areas.append(round(face_area, 3))
+        largest_area = max(largest_area, face_area)
+        num_reconstructed_faces = len(all_face_areas)
+        face_types.append(len(face_triangles))  # Count of triangles per face type
+
+    print(len(hull.simplices))
+    print(hull.simplices)
+
+    return round(largest_area, 3), all_face_areas, num_reconstructed_faces, face_types
 
 
 def get_formula(points_wd, CN, site_symbol_map):
@@ -142,10 +206,10 @@ def d_by_dmin(k, v, center, site_symbol_map):
             # keep only the lowest/first
             inner_CN = int(inner_gap_index[0])
             lowest_inner_CN = int(inner_gap_index.min())
-            distances, angles = polyhedron_metrics(center, points_wd[:inner_CN])
-            distances = [p[1] for p in points_wd[:inner_CN]]
+            distances, angles = polyhedron_metrics(center, points_wd[:outer_CN])
+            distances = [p[1] for p in points_wd[:outer_CN]]
 
-            coords = [p[0] for p in points_wd[:inner_CN]]
+            coords = [p[0] for p in points_wd[:outer_CN]]
             coords.append(center)
             #print(inner_CN)
             #print(points_wd[:inner_CN])
@@ -153,15 +217,17 @@ def d_by_dmin(k, v, center, site_symbol_map):
             #print(f"Site {k}: using {len(coords)} points for ConvexHull")   
 
             hull = ConvexHull([p[0] for p in points_wd[:outer_CN]])
+            plot_convex_hull([p[0] for p in points_wd[:outer_CN]], central_atom=center)
             metrics = compute_polyhedron_metrics(coords, hull)
-            #print(metrics)
-            #print(hull)
+            largest_face_area, all_face_areas, num_reconstructed_faces, face_types = compute_largest_face_area(coords, hull)
 
             return {'site': k, 
                     'outer_CN': outer_CN, 'formula_outer_CN': get_formula(points_wd, outer_CN, site_symbol_map),
                     'inner_CN': inner_CN, 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
                     'lowest_inner_CN': lowest_inner_CN, 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
-                    'distances': distances, 'angles': angles}, metrics
+                    'distances': distances, 'angles': angles, 'largest_face_area': largest_face_area, 
+                    'all_face_areas': all_face_areas, 'num_reconstructed_faces': num_reconstructed_faces, 
+                    'face_types': face_types}, metrics
 
     return
 
@@ -260,7 +326,7 @@ def run_parallel(root_dir, nmax=100):
     
     results = list(results)
     df = pd.DataFrame(results)
-    df[['CIF#', 'site','central_atom', 'Wyckoff', 'outer_CN', 'formula_outer_CN', 'inner_CN', 'formula_inner_CN', 'lowest_inner_CN', 'formula_lowest_inner_CN', 'distances', 'angles']].to_csv('innerCN_results.csv', index=False)
+    df[['CIF#', 'site','central_atom', 'Wyckoff', 'outer_CN', 'formula_outer_CN', 'inner_CN', 'formula_inner_CN', 'lowest_inner_CN', 'formula_lowest_inner_CN', 'distances', 'angles', 'face_types']].to_csv('innerCN_results.csv', index=False)
             
     
     
@@ -274,4 +340,3 @@ if __name__ == "__main__":
     t0 = time.time()
     run_parallel(root)
     print(round(time.time()-t0, 1))
-    
