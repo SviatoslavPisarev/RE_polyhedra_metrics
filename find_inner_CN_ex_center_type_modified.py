@@ -1,63 +1,45 @@
-import multiprocessing.process
 import os
+import time
 from cifkit import Cif
 import traceback
-import multiprocessing as mp
 import pandas as pd
 import numpy as np
-from cifkit.coordination.composition import count_connections_per_site
 from scipy.spatial import ConvexHull
 from skspatial.objects import Points
-import matplotlib
-import matplotlib.patches
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from scipy.spatial import Delaunay
 from collections import defaultdict
-import multiprocessing
-
-def plot_convex_hull(points, central_atom=None):
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    points = np.array(points)
-    hull = ConvexHull(points)
-
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection="3d")
-
-    for simplex in hull.simplices:
-        triangle = points[simplex]
-        poly = Poly3DCollection([triangle], alpha=0.3, edgecolor='k')
-        poly.set_facecolor('skyblue')
-        ax.add_collection3d(poly)
-
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], color="blue", label="neighbors")
-
-    if central_atom is not None:
-        ax.scatter(*central_atom, color="red", s=100, label="central atom")
-
-    ax.set_title("Convex Hull of Polyhedron")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
-
 from numpy.linalg import norm
 from re import match
 from cifkit.coordination.geometry import compute_polyhedron_metrics
 
+# def plot_convex_hull(points, central_atom=None):
+#     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+#     points = np.array(points)
+#     hull = ConvexHull(points)
+
+#     fig = plt.figure(figsize=(8, 6))
+#     ax = fig.add_subplot(111, projection="3d")
+
+#     for simplex in hull.simplices:
+#         triangle = points[simplex]
+#         poly = Poly3DCollection([triangle], alpha=0.3, edgecolor='k')
+#         poly.set_facecolor('skyblue')
+#         ax.add_collection3d(poly)
+
+#     ax.scatter(points[:, 0], points[:, 1], points[:, 2], color="blue", label="neighbors")
+
+#     if central_atom is not None:
+#         ax.scatter(*central_atom, color="red", s=100, label="central atom")
+
+#     ax.set_title("Convex Hull of Polyhedron")
+#     ax.legend()
+#     plt.tight_layout()
+#     plt.show()
+
 RE_ELEMENTS = {"Y", "La", "Ce", "Pr", "Nd", "Sm", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Lu"}
-
-ideal_polyhedron_metrics = {
-    # polyhedron: [[distances], [angles]]
-    'tetrahedon': [[1., 1., 1., 1.], [60., 60., 60., ]],
-    'square_pyramid': [1., 0., ]
-}
-
-
 
 def polyhedron_metrics(center, points_wd):
     points = [[p][0][0] for p in points_wd]
-    # print(points)
     distances = []
     angles = []
     try:
@@ -124,25 +106,16 @@ def compute_largest_face_area(coords, hull, angle_tol=1e-2):
         normals.append(normal_key)
         simplices_by_normal[normal_key].append(simplex)
 
-    all_face_areas = []
     largest_area = 0.0
-    face_types = []
 
     for face_triangles in simplices_by_normal.values():
         face_area = 0.0
         for tri in face_triangles:
             a, b, c = coords[tri]
             face_area += triangle_area(a, b, c)
-        all_face_areas.append(round(face_area, 3))
         largest_area = max(largest_area, face_area)
-        num_reconstructed_faces = len(all_face_areas)
-        face_types.append(len(face_triangles))  # Count of triangles per face type
 
-    print(len(hull.simplices))
-    print(hull.simplices)
-
-    return round(largest_area, 3), all_face_areas, num_reconstructed_faces, face_types
-
+    return round(largest_area, 3)
 
 def get_formula(points_wd, CN, site_symbol_map):
     symbols = [s[2] for s in points_wd[:CN]]
@@ -156,7 +129,6 @@ def get_formula(points_wd, CN, site_symbol_map):
     for e, c in elements:
         formula += f"{e}{'' if c==1 else c}"
     return formula
-
 
 def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map):
     
@@ -177,14 +149,12 @@ def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map):
 
     return outer_CN
         
-        
 def d_by_dmin(k, v, center, site_symbol_map):
     
     points_wd =[[p[3], p[1], p[0]] for p in v]
     inner_CN = None
     
     # sort
-    #print(points_wd)
     points_wd = sorted(points_wd, key=lambda x: x[1])[:20]
     distances = np.array([p[1] for p in points_wd])
     distances /= distances.min()
@@ -211,26 +181,18 @@ def d_by_dmin(k, v, center, site_symbol_map):
 
             coords = [p[0] for p in points_wd[:outer_CN]]
             coords.append(center)
-            #print(inner_CN)
-            #print(points_wd[:inner_CN])
-            #print(distances)
-            #print(f"Site {k}: using {len(coords)} points for ConvexHull")   
 
             hull = ConvexHull([p[0] for p in points_wd[:outer_CN]])
-            plot_convex_hull([p[0] for p in points_wd[:outer_CN]], central_atom=center)
             metrics = compute_polyhedron_metrics(coords, hull)
-            largest_face_area, all_face_areas, num_reconstructed_faces, face_types = compute_largest_face_area(coords, hull)
+            largest_face_area = compute_largest_face_area(coords, hull)
 
             return {'site': k, 
                     'outer_CN': outer_CN, 'formula_outer_CN': get_formula(points_wd, outer_CN, site_symbol_map),
                     'inner_CN': inner_CN, 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
                     'lowest_inner_CN': lowest_inner_CN, 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
-                    'distances': distances, 'angles': angles, 'largest_face_area': largest_face_area, 
-                    'all_face_areas': all_face_areas, 'num_reconstructed_faces': num_reconstructed_faces, 
-                    'face_types': face_types}, metrics
+                    'distances': distances, 'angles': angles, 'largest_face_area': largest_face_area}, metrics
 
     return
-
 
 def find_cenvs_s(cif_path):
     try:
@@ -248,9 +210,6 @@ def find_cenvs_s(cif_path):
                 wyckoff = f"{loop_vals[2][i]}{loop_vals[3][i]}"
                 central_atom = loop_vals[1][i]
                 center = v[0][2]
-                #print(central_atom)
-                #print(center)
-                # points_wd =[[p[3], p[1]] for p in v]
                 data, metrics = d_by_dmin(k, v, center, site_symbol_map)
                 outer_CN = d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map)
             
@@ -271,72 +230,42 @@ def find_cenvs_s(cif_path):
         print(traceback.format_exc())
     return 
 
-
-def find_cenvs(cif_path, results):
-    try:
-        cifn = cif_path.split(os.sep)[-1][:-4]
-        cif = Cif(cif_path, is_formatted=True)
-        # label, symbol, mult, Wyckoff_symbol, x, y, z, occ
-        cif.compute_connections()
-        loop_vals = cif._loop_values
-        site_symbol_map = dict(zip([l for l in loop_vals[0]], [s for s in loop_vals[1]]))
-
-        conns = cif.connections
-        data = None
-        for i, (k, v) in enumerate(conns.items()):
-            wyckoff = f"{loop_vals[2][i]}{loop_vals[3][i]}"
-            central_atom = loop_vals[1][i]
-            center = v[0][2]
-            data = d_by_dmin(k, v, center, site_symbol_map)
-            
-            if data is not None:
-                data['CIF#'] = cifn
-                data['central_atom'] = central_atom
-                data['Wyckoff'] = wyckoff
-                results.append(data) 
-    except:
-        print(f"Error while processing {cifn}")
-        print(traceback.format_exc())
-    return 
-
-
-def aux_mp(*args):
-    for arg in args:
-        find_cenvs(**arg)
-
-
-def run_parallel(root_dir, nmax=100):
-    tasks = []
-    manager = multiprocessing.Manager()
-    results = manager.list()
-    
-    for i, c in enumerate(os.listdir(root_dir)):
-        if not c.endswith(".cif"):
-            continue
-        
-        # if i > nmax:
-        #     break
-        
-        tasks.append({'cif_path': f"{root}{os.sep}{c}", 'results': results})
-        
-    with mp.Pool(multiprocessing.cpu_count() - 2) as pool:
-        pool.map(aux_mp, tasks)
-    pool.close()
-    pool.join()
-    
-    results = list(results)
-    df = pd.DataFrame(results)
-    df[['CIF#', 'site','central_atom', 'Wyckoff', 'outer_CN', 'formula_outer_CN', 'inner_CN', 'formula_inner_CN', 'lowest_inner_CN', 'formula_lowest_inner_CN', 'distances', 'angles', 'face_types']].to_csv('innerCN_results.csv', index=False)
-            
-    
-    
 if __name__ == "__main__":
-    import time
-    root = "/Users/sviatoslavpisarev/Desktop/structure-analyzer-featurizer-main/Proj5"
-    results = find_cenvs_s(cif_path=f"{root}{os.sep}LaTmIr2Ge4.cif")
-    df = pd.DataFrame(results)
-    df.to_csv("LaTmIr2Ge4_metrics.csv", index=False)
-    exit(0)
+
+    base_dir = os.getcwd()
+    subdirs = [d for d in os.listdir(base_dir) if os.path.isdir(d)]
+    cif_dirs = [d for d in subdirs if any(f.endswith('.cif') for f in os.listdir(os.path.join(base_dir, d)))]
+
+    if not cif_dirs:
+        print("No directories with CIF files found.")
+        exit(1)
+
+    print("Select a directory to process:")
+    for i, d in enumerate(cif_dirs, start=1):
+        print(f"{i}. {d}")
+
+    choice = input("Enter the number of the directory: ")
+    try:
+        selected_dir = cif_dirs[int(choice)-1]
+    except (IndexError, ValueError):
+        print("Invalid selection.")
+        exit(1)
+
+    root = os.path.join(base_dir, selected_dir)
     t0 = time.time()
-    run_parallel(root)
-    print(round(time.time()-t0, 1))
+    tasks = []
+    results = []
+
+    for file in os.listdir(root):
+        if file.endswith(".cif"):
+            path = os.path.join(root, file)
+            result = find_cenvs_s(path)
+            if result:
+                results.extend(result)
+
+    if results:
+        df = pd.DataFrame(results)
+        df.to_csv(f"{selected_dir}_RE_polyhedra_metrics.csv", index=False)
+        print(f"Saved results to {selected_dir}_RE_polyhedra_metrics.csv")
+
+    print(f"Total time: {round(time.time()-t0, 1)} seconds")
