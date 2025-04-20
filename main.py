@@ -288,19 +288,28 @@ if __name__ == "__main__":
     cif_dirs = [d for d in subdirs if any(f.endswith('.cif') for f in os.listdir(os.path.join(base_dir, d)))]
 
     if not cif_dirs:
-        print("No directories with CIF files found.")
-        exit(1)
+        user_choice = input("No directories with CIF files found. Specify a directory manually? (Y/n): ").strip().lower()
+        if user_choice == 'y' or user_choice == '':
+            selected_dir = input("Enter the directory path: ").strip()
+            if not os.path.isdir(selected_dir):
+                print("Directory not found.")
+                exit(1)
+        else:
+            exit(1)
 
     print("Select a directory to process:")
     for i, d in enumerate(cif_dirs, start=1):
         print(f"{i}. {d}")
 
-    choice = input("Enter the number of the directory: ")
+    choice = input("Enter the number of the directory or manually specify a directory: ")
     try:
         selected_dir = cif_dirs[int(choice)-1]
     except (IndexError, ValueError):
-        print("Invalid selection.")
-        exit(1)
+        if os.path.isdir(choice.strip()):
+            selected_dir = choice.strip()
+        else:
+            print("Invalid selection or directory not found.")
+            exit(1)
 
     root = os.path.join(base_dir, selected_dir)
     t0 = time.time()
