@@ -10,6 +10,9 @@ from collections import defaultdict
 from numpy.linalg import norm
 from re import match
 from cifkit.coordination.geometry import compute_polyhedron_metrics
+from collections import deque
+
+# import matplotlib.pyplot as plt
 
 # def plot_convex_hull(points, central_atom=None):
 #     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -86,7 +89,7 @@ def polyhedron_metrics(center, points_wd):
          
     return distances, angles
 
-def compute_largest_face_area(coords, hull, angle_tol=1e-2):
+def compute_largest_face_area(coords, hull, angle_threshold_deg=5.0):
     def triangle_area(a, b, c):
         return 0.5 * norm(np.cross(b - a, c - a))
 
@@ -94,28 +97,56 @@ def compute_largest_face_area(coords, hull, angle_tol=1e-2):
         normal = np.cross(b - a, c - a)
         return normal / norm(normal)
 
+    def triangles_connected(tri1, tri2):
+        # Check if triangles share at least two points (edge)
+        return len(set(tri1) & set(tri2)) >= 2
+
     coords = np.array(coords)
-    normals = []
-    simplices_by_normal = defaultdict(list)
+    normals = [unit_normal(*coords[simplex]) for simplex in hull.simplices]
+    simplices_used = set()
+    preliminary_groups = []
 
-    for simplex in hull.simplices:
-        a, b, c = coords[simplex]
-        normal = unit_normal(a, b, c)
-        # Round to avoid floating point drift, group by direction
-        normal_key = tuple(np.round(normal / angle_tol ).astype(int))
-        normals.append(normal_key)
-        simplices_by_normal[normal_key].append(simplex)
+    angle_threshold_rad = np.deg2rad(angle_threshold_deg)
 
+    # Initial grouping based on normal vector similarity
+    for idx, normal in enumerate(normals):
+        if idx in simplices_used:
+            continue
+        current_group = [idx]
+        simplices_used.add(idx)
+        for jdx, other_normal in enumerate(normals):
+            if jdx not in simplices_used:
+                angle = np.arccos(np.clip(np.dot(normal, other_normal), -1.0, 1.0))
+                if angle < angle_threshold_rad or np.pi - angle < angle_threshold_rad:
+                    current_group.append(jdx)
+                    simplices_used.add(jdx)
+        preliminary_groups.append(current_group)
+
+    # Further separate groups based on triangle connectivity
+    final_groups = []
+    for group in preliminary_groups:
+        unvisited = set(group)
+        while unvisited:
+            connected_group = []
+            queue = deque([unvisited.pop()])
+            while queue:
+                current = queue.popleft()
+                connected_group.append(current)
+                neighbors = set()
+                for candidate in unvisited:
+                    if triangles_connected(hull.simplices[current], hull.simplices[candidate]):
+                        neighbors.add(candidate)
+                queue.extend(neighbors)
+                unvisited -= neighbors
+            final_groups.append(connected_group)
+
+    # Find the largest face area among connected groups
     largest_area = 0.0
-
-    for face_triangles in simplices_by_normal.values():
-        face_area = 0.0
-        for tri in face_triangles:
-            a, b, c = coords[tri]
-            face_area += triangle_area(a, b, c)
+    for face_group in final_groups:
+        face_area = sum(triangle_area(*coords[hull.simplices[idx]]) for idx in face_group)
         largest_area = max(largest_area, face_area)
 
-    return round(largest_area, 3)
+    return round(largest_area, 3), len(final_groups), [len(group) for group in final_groups]
 
 def get_formula(points_wd, CN, site_symbol_map):
     symbols = [s[2] for s in points_wd[:CN]]
@@ -183,14 +214,18 @@ def d_by_dmin(k, v, center, site_symbol_map):
             coords.append(center)
 
             hull = ConvexHull([p[0] for p in points_wd[:outer_CN]])
+
+            # plot_convex_hull([p[0] for p in points_wd[:outer_CN]], central_atom=center)
+
             metrics = compute_polyhedron_metrics(coords, hull)
-            largest_face_area = compute_largest_face_area(coords, hull)
+            largest_face_area, num_faces, triangles_per_face = compute_largest_face_area(coords, hull)
 
             return {'site': k, 
                     'outer_CN': outer_CN, 'formula_outer_CN': get_formula(points_wd, outer_CN, site_symbol_map),
                     'inner_CN': inner_CN, 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
                     'lowest_inner_CN': lowest_inner_CN, 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
-                    'distances': distances, 'angles': angles, 'largest_face_area': largest_face_area}, metrics
+                    'distances': distances, 'angles': angles,'largest_face_area': largest_face_area, 
+                    'num_faces': num_faces, 'triangles_per_face': triangles_per_face}, metrics
 
     return
 
