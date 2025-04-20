@@ -41,6 +41,17 @@ from collections import deque
 
 RE_ELEMENTS = {"Y", "La", "Ce", "Pr", "Nd", "Sm", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Lu"}
 
+def polygon_name(triangles):
+    mapping = {
+        1: 'triangle', 
+        2: 'quadrilateral', 
+        3: 'pentagon', 
+        4: 'hexagon', 
+        5: 'heptagon', 
+        6: 'octagon'
+    }
+    return mapping.get(triangles, f"{triangles+2}-gon")
+
 def polyhedron_metrics(center, points_wd):
     points = [[p][0][0] for p in points_wd]
     distances = []
@@ -146,7 +157,12 @@ def compute_largest_face_area(coords, hull, angle_threshold_deg=5.0):
         face_area = sum(triangle_area(*coords[hull.simplices[idx]]) for idx in face_group)
         largest_area = max(largest_area, face_area)
 
-    return round(largest_area, 3), len(final_groups), [len(group) for group in final_groups]
+    from collections import Counter
+    face_counts = Counter(len(group) for group in final_groups)
+    face_descriptions = [f"{count}*{polygon_name(num_triangles)}" for num_triangles, count in sorted(face_counts.items(), reverse=True)]
+    face_description_str = ', '.join(face_descriptions)
+    
+    return round(largest_area, 3), len(final_groups), face_description_str
 
 def get_formula(points_wd, CN, site_symbol_map):
     symbols = [s[2] for s in points_wd[:CN]]
@@ -225,7 +241,7 @@ def d_by_dmin(k, v, center, site_symbol_map):
                     'inner_CN': inner_CN, 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
                     'lowest_inner_CN': lowest_inner_CN, 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
                     'distances': distances, 'angles': angles,'largest_face_area': largest_face_area, 
-                    'num_faces': num_faces, 'triangles_per_face': triangles_per_face}, metrics
+                    'num_reconstructed_faces': num_faces, 'triangles_per_face': triangles_per_face}, metrics
 
     return
 
