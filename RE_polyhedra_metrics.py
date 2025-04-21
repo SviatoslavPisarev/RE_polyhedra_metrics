@@ -1,5 +1,8 @@
 import os
+from io import StringIO
+import contextlib
 import time
+from tqdm import tqdm
 from cifkit import Cif
 import traceback
 import pandas as pd
@@ -9,35 +12,8 @@ from skspatial.objects import Points
 from collections import defaultdict
 from numpy.linalg import norm
 from re import match
-from cifkit.coordination.geometry import compute_polyhedron_metrics
 from collections import deque
-
-# import matplotlib.pyplot as plt
-
-# def plot_convex_hull(points, central_atom=None):
-#     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-#     points = np.array(points)
-#     hull = ConvexHull(points)
-
-#     fig = plt.figure(figsize=(8, 6))
-#     ax = fig.add_subplot(111, projection="3d")
-
-#     for simplex in hull.simplices:
-#         triangle = points[simplex]
-#         poly = Poly3DCollection([triangle], alpha=0.3, edgecolor='k')
-#         poly.set_facecolor('skyblue')
-#         ax.add_collection3d(poly)
-
-#     ax.scatter(points[:, 0], points[:, 1], points[:, 2], color="blue", label="neighbors")
-
-#     if central_atom is not None:
-#         ax.scatter(*central_atom, color="red", s=100, label="central atom")
-
-#     ax.set_title("Convex Hull of Polyhedron")
-#     ax.legend()
-#     plt.tight_layout()
-#     plt.show()
+from multiprocessing import Pool, cpu_count
 
 RE_ELEMENTS = {"Y", "La", "Ce", "Pr", "Nd", "Sm", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Lu"}
 
@@ -100,7 +76,7 @@ def polyhedron_metrics(center, points_wd):
          
     return distances, angles
 
-def compute_largest_face_area(coords, hull, angle_threshold_deg=5.0):
+def compute_largest_face_area(coords, hull, angle_threshold_deg=0.05):
     def triangle_area(a, b, c):
         return 0.5 * norm(np.cross(b - a, c - a))
 
@@ -153,16 +129,20 @@ def compute_largest_face_area(coords, hull, angle_threshold_deg=5.0):
 
     # Find the largest face area among connected groups
     largest_area = 0.0
+    face_centers = []
     for face_group in final_groups:
         face_area = sum(triangle_area(*coords[hull.simplices[idx]]) for idx in face_group)
         largest_area = max(largest_area, face_area)
+        all_vertices = np.vstack([coords[hull.simplices[idx]] for idx in face_group])
+        face_center = np.mean(all_vertices, axis=0)
+        face_centers.append(face_center)
 
     from collections import Counter
     face_counts = Counter(len(group) for group in final_groups)
     face_descriptions = [f"{count}*{polygon_name(num_triangles)}" for num_triangles, count in sorted(face_counts.items(), reverse=True)]
     face_description_str = ', '.join(face_descriptions)
     
-    return round(largest_area, 3), len(final_groups), face_description_str
+    return round(largest_area, 3), len(final_groups), face_description_str, face_centers
 
 def get_formula(points_wd, CN, site_symbol_map):
     symbols = [s[2] for s in points_wd[:CN]]
@@ -196,7 +176,7 @@ def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map):
 
     return outer_CN
         
-def d_by_dmin(k, v, center, site_symbol_map):
+def d_by_dmin(k, v, center, site_symbol_map, cif_path):
     
     points_wd =[[p[3], p[1], p[0]] for p in v]
     inner_CN = None
@@ -218,72 +198,109 @@ def d_by_dmin(k, v, center, site_symbol_map):
     inner_gap_index = inner_gap_index[inner_gap_index >= 4]
 
     if match(r"[A-Za-z]+", k).group() in RE_ELEMENTS:
-
-        if len(inner_gap_index):
-            # keep only the lowest/first
+        if not len(inner_gap_index):
+            inner_CN = outer_CN
+            lowest_inner_CN = outer_CN
+        else:
             inner_CN = int(inner_gap_index[0])
             lowest_inner_CN = int(inner_gap_index.min())
-            distances, angles = polyhedron_metrics(center, points_wd[:outer_CN])
-            distances = [p[1] for p in points_wd[:outer_CN]]
 
-            coords = [p[0] for p in points_wd[:outer_CN]]
-            coords.append(center)
+        error_capture = StringIO()
+        with contextlib.redirect_stdout(error_capture), contextlib.redirect_stderr(error_capture):
+            try:
+                distances, angles = polyhedron_metrics(center, points_wd[:outer_CN])
+                distances = [p[1] for p in points_wd[:outer_CN]]
+                coords = [p[0] for p in points_wd[:outer_CN]]
+                coords.append(center)
+                coords = np.array(coords)
+                central_atom_coord = coords[-1]
+                neighbor_coords = coords[:-1]
+                hull = ConvexHull(neighbor_coords)
 
-            hull = ConvexHull([p[0] for p in points_wd[:outer_CN]])
+                volume = hull.volume
+                avg_point = np.mean(neighbor_coords, axis=0)
+                distance_from_avg_point_to_center = np.linalg.norm(avg_point - central_atom_coord)
 
-            # plot_convex_hull([p[0] for p in points_wd[:outer_CN]], central_atom=center)
+                largest_face_area, num_faces, face_geometry, face_centers = compute_largest_face_area(coords, hull)
+                filtered_face_centers = [fc for fc in face_centers if np.linalg.norm(fc - central_atom_coord) > 1e-4]
+                if filtered_face_centers:
+                    distances_to_faces = np.linalg.norm(np.array(filtered_face_centers) - central_atom_coord, axis=1)
+                    shortest_distance_to_face = np.min(distances_to_faces)
+                else:
+                    shortest_distance_to_face = None
 
-            metrics = compute_polyhedron_metrics(coords, hull)
-            largest_face_area, num_faces, triangles_per_face = compute_largest_face_area(coords, hull)
-
-            return {'site': k, 
-                    'outer_CN': outer_CN, 'formula_outer_CN': get_formula(points_wd, outer_CN, site_symbol_map),
-                    'inner_CN': inner_CN, 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
-                    'lowest_inner_CN': lowest_inner_CN, 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
-                    'distances': distances, 'angles': angles,'largest_face_area': largest_face_area, 
-                    'num_reconstructed_faces': num_faces, 'triangles_per_face': triangles_per_face}, metrics
-
+                return {'site': k,
+                        'outer_CN': outer_CN,
+                        'formula_outer_CN': get_formula(points_wd, outer_CN, site_symbol_map),
+                        # 'inner_CN': inner_CN,
+                        # 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
+                        # 'lowest_inner_CN': lowest_inner_CN,
+                        # 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
+                        # 'distances': distances,
+                        # 'angles': angles,
+                        'volume_of_polyhedron': round(volume, 4),
+                        'distance_from_avg_point_to_center': round(distance_from_avg_point_to_center, 4),
+                        'shortest_distance_to_face': round(shortest_distance_to_face, 4) if shortest_distance_to_face is not None else None,
+                        'largest_face_area': largest_face_area,
+                        'num_reconstructed_faces': num_faces,
+                        'face_geometry': face_geometry
+                        }
+            except Exception as e:
+                return {'file': os.path.basename(cif_path), 'site': k, 'error': f"Polyhedron construction failed: {str(e)}"}
+    
     return
 
 def find_cenvs_s(cif_path):
     try:
+        results = []
         cif = Cif(cif_path, is_formatted=True)
         # label, symbol, mult, Wyckoff_symbol, x, y, z, occ
-        cif.compute_connections()
+        error_capture = StringIO()
+        with contextlib.redirect_stdout(error_capture):
+            cif.compute_connections()
+        connection_output = error_capture.getvalue()
+        poly_error_lines = [line.strip() for line in connection_output.splitlines() if "Error in polyhedron calculation" in line]
+        import re
+        for msg in poly_error_lines:
+            match_site = re.search(r"for(\w+)\s", msg)
+            site = match_site.group(1) if match_site else None
+            results.append({'file': os.path.basename(cif_path), 'site': site, 'error': msg})
+        conns = cif.connections
         loop_vals = cif._loop_values
         site_symbol_map = dict(zip([l for l in loop_vals[0]], [s for s in loop_vals[1]]))
 
-        conns = cif.connections
-        results = []
         data = None
         for i, (k, v) in enumerate(conns.items()):
             if match(r"[A-Za-z]+", k).group() in RE_ELEMENTS:
                 wyckoff = f"{loop_vals[2][i]}{loop_vals[3][i]}"
                 central_atom = loop_vals[1][i]
                 center = v[0][2]
-                data, metrics = d_by_dmin(k, v, center, site_symbol_map)
+                data = d_by_dmin(k, v, center, site_symbol_map, cif_path)
                 outer_CN = d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map)
             
                 if data is not None:
                     data['CIF#'] = cif_path.split(os.sep)[-1][:-4]
                     data['central_atom'] = central_atom
                     data['Wyckoff'] = wyckoff
-                    data['CN_without_neigh_same_as_center'] = outer_CN
+                    # data['CN_without_neigh_same_as_center'] = outer_CN
 
-                    if metrics is not None:
-                        combined = {**data, **metrics}
-                        results.append(combined)
-                    else:
-                        results.append(data)
+                    results.append(data)
+                else:
+                    results.append({'file': os.path.basename(cif_path), 'site': k, 'error': 'Polyhedron metrics returned None'})
 
         return results
-    except:
-        print(traceback.format_exc())
-    return 
+    except Exception as e:
+        return [{'file': os.path.basename(cif_path), 'site': None, 'error': str(e)}]
+
+def worker(file_path):
+    try:
+        return find_cenvs_s(file_path)
+    except Exception as e:
+        return [{'file': os.path.basename(file_path), 'site': None, 'error': str(e)}]
 
 if __name__ == "__main__":
 
-    base_dir = os.getcwd()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     subdirs = [d for d in os.listdir(base_dir) if os.path.isdir(d)]
     cif_dirs = [d for d in subdirs if any(f.endswith('.cif') for f in os.listdir(os.path.join(base_dir, d)))]
 
@@ -315,17 +332,33 @@ if __name__ == "__main__":
     t0 = time.time()
     tasks = []
     results = []
+    errors = []
 
-    for file in os.listdir(root):
-        if file.endswith(".cif"):
-            path = os.path.join(root, file)
-            result = find_cenvs_s(path)
+    with Pool(processes=cpu_count() - 1) as pool:
+        cif_files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith(".cif")]
+        all_results = []
+        for result in tqdm(pool.imap_unordered(worker, cif_files), total=len(cif_files)):
             if result:
-                results.extend(result)
+                all_results.append(result)
+
+    for result in all_results:
+        if result:
+            for entry in result:
+                if 'error' in entry:
+                    errors.append({k: entry.get(k) for k in ('file', 'site', 'error')})
+                else:
+                    results.append(entry)
 
     if results:
         df = pd.DataFrame(results)
-        df.to_csv(f"{selected_dir}_RE_polyhedra_metrics.csv", index=False)
-        print(f"Saved results to {selected_dir}_RE_polyhedra_metrics.csv")
+        output_filename = f"{os.path.basename(os.path.normpath(selected_dir))}_RE_polyhedra_metrics.csv"
+        output_path = os.path.join(base_dir, output_filename)
+        df.to_csv(output_path, index=False)
+
+    if errors:
+        df_err = pd.DataFrame(errors)
+        errors_output_filename = f"{os.path.basename(os.path.normpath(selected_dir))}_RE_polyhedra_errors.csv"
+        errors_output_path = os.path.join(base_dir, errors_output_filename)
+        df_err.to_csv(errors_output_path, index=False)
 
     print(f"Total time: {round(time.time()-t0, 1)} seconds")
