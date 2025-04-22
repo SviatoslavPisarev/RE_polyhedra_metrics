@@ -157,11 +157,11 @@ def get_formula(points_wd, CN, site_symbol_map):
         formula += f"{e}{'' if c==1 else c}"
     return formula
 
-def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map):
+def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map, cif_path):
     
     v = sorted(v, key=lambda x: x[1])
     i_same_as_center = min([100, *[i for i in range(len(v)) if site_symbol_map[v[i][0]] == site_symbol_map[k]]])
-    points_wd =[[p[3], p[1], p[0]] for p in v]
+    points_wd = [[p[3], p[1], p[0]] for p in v if site_symbol_map[p[0]] not in RE_ELEMENTS]
 
     # sort
     points_wd = sorted(points_wd, key=lambda x: x[1])[:20]
@@ -172,9 +172,51 @@ def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map):
     ind_gaps = np.argsort(gaps)
     inner_gap_index = np.array(ind_gaps[::-1])
     inner_gap_index = inner_gap_index[inner_gap_index <= i_same_as_center]
-    outer_CN = int(inner_gap_index[0]) + 1 if len(inner_gap_index) else 0
+    outer_CN_wo_center_type = int(inner_gap_index[0]) + 1 if len(inner_gap_index) else 0
 
-    return outer_CN
+    error_capture = StringIO()
+    with contextlib.redirect_stdout(error_capture), contextlib.redirect_stderr(error_capture):
+            try:
+                distances, angles = polyhedron_metrics(center, points_wd[:outer_CN_wo_center_type])
+                distances = [p[1] for p in points_wd[:outer_CN_wo_center_type]]
+                coords = [p[0] for p in points_wd[:outer_CN_wo_center_type]]
+                coords.append(center)
+                coords = np.array(coords)
+                central_atom_coord = coords[-1]
+                neighbor_coords = coords[:-1]
+                hull = ConvexHull(neighbor_coords)
+
+                volume = hull.volume
+                avg_point = np.mean(neighbor_coords, axis=0)
+                distance_from_avg_point_to_center = np.linalg.norm(avg_point - central_atom_coord)
+
+                largest_face_area, num_faces, face_geometry, face_centers = compute_largest_face_area(coords, hull)
+                filtered_face_centers = [fc for fc in face_centers if np.linalg.norm(fc - central_atom_coord) > 1e-4]
+                if filtered_face_centers:
+                    distances_to_faces = np.linalg.norm(np.array(filtered_face_centers) - central_atom_coord, axis=1)
+                    shortest_distance_to_face = np.min(distances_to_faces)
+                else:
+                    shortest_distance_to_face = None
+
+                return {'outer_CN_wo_center_type': outer_CN_wo_center_type,
+                        'formula_outer_CN_wo_center_type': get_formula(points_wd, outer_CN_wo_center_type, site_symbol_map),
+                        # 'inner_CN': inner_CN,
+                        # 'formula_inner_CN': get_formula(points_wd, inner_CN, site_symbol_map),
+                        # 'lowest_inner_CN': lowest_inner_CN,
+                        # 'formula_lowest_inner_CN': get_formula(points_wd, lowest_inner_CN, site_symbol_map),
+                        # 'distances': distances,
+                        # 'angles': angles,
+                        'volume_of_polyhedron_wo': round(volume, 4),
+                        'distance_from_avg_point_to_center_wo': round(distance_from_avg_point_to_center, 4),
+                        'shortest_distance_to_face_wo': round(shortest_distance_to_face, 4) if shortest_distance_to_face is not None else None,
+                        'largest_face_area_wo': largest_face_area,
+                        'num_reconstructed_faces_wo': num_faces,
+                        'face_geometry_wo': face_geometry
+                        }
+            except Exception as e:
+                return {'file': os.path.basename(cif_path), 'site': k, 'error': f"Polyhedron construction failed: {str(e)}"}
+
+    return 
         
 def d_by_dmin(k, v, center, site_symbol_map, cif_path):
     
@@ -190,7 +232,7 @@ def d_by_dmin(k, v, center, site_symbol_map, cif_path):
     ind_gaps = np.argsort(gaps)
     
     inner_gap_index = np.array(ind_gaps[::-1])
-    outer_CN = d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map)
+    outer_CN = int(inner_gap_index[0]) + 1
     inner_gap_index = inner_gap_index - inner_gap_index[0]
     inner_gap_index = inner_gap_index[:5]
     inner_gap_index = inner_gap_index[inner_gap_index < 0]
@@ -221,6 +263,8 @@ def d_by_dmin(k, v, center, site_symbol_map, cif_path):
                 avg_point = np.mean(neighbor_coords, axis=0)
                 distance_from_avg_point_to_center = np.linalg.norm(avg_point - central_atom_coord)
 
+                data_wo = d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map, cif_path)
+
                 largest_face_area, num_faces, face_geometry, face_centers = compute_largest_face_area(coords, hull)
                 filtered_face_centers = [fc for fc in face_centers if np.linalg.norm(fc - central_atom_coord) > 1e-4]
                 if filtered_face_centers:
@@ -244,7 +288,7 @@ def d_by_dmin(k, v, center, site_symbol_map, cif_path):
                         'largest_face_area': largest_face_area,
                         'num_reconstructed_faces': num_faces,
                         'face_geometry': face_geometry
-                        }
+                        }, data_wo
             except Exception as e:
                 return {'file': os.path.basename(cif_path), 'site': k, 'error': f"Polyhedron construction failed: {str(e)}"}
     
@@ -275,16 +319,21 @@ def find_cenvs_s(cif_path):
                 wyckoff = f"{loop_vals[2][i]}{loop_vals[3][i]}"
                 central_atom = loop_vals[1][i]
                 center = v[0][2]
-                data = d_by_dmin(k, v, center, site_symbol_map, cif_path)
-                outer_CN = d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map)
+                data, data_wo = d_by_dmin(k, v, center, site_symbol_map, cif_path)
             
                 if data is not None:
                     data['CIF#'] = cif_path.split(os.sep)[-1][:-4]
                     data['central_atom'] = central_atom
                     data['Wyckoff'] = wyckoff
-                    # data['CN_without_neigh_same_as_center'] = outer_CN
+                    # data['CN_without_neigh_same_as_center'] = outer_CN_wo_center_type
 
-                    results.append(data)
+                    if data_wo is not None:
+                        data_wo = {f"{k}": v for k, v in data_wo.items() if k not in {'site', 'error', 'file'}}
+                        combined = {**data, **data_wo}
+                        results.append(combined)
+                    else:
+                        results.append(data)
+
                 else:
                     results.append({'file': os.path.basename(cif_path), 'site': k, 'error': 'Polyhedron metrics returned None'})
 
@@ -360,5 +409,34 @@ if __name__ == "__main__":
         errors_output_filename = f"{os.path.basename(os.path.normpath(selected_dir))}_RE_polyhedra_errors.csv"
         errors_output_path = os.path.join(base_dir, errors_output_filename)
         df_err.to_csv(errors_output_path, index=False)
+
+    # Create summary with min/max values per CIF# from data_wo
+    if results:
+        grouped_by_cif = defaultdict(list)
+        for row in results:
+            if all(key in row for key in ['volume_of_polyhedron_wo', 'distance_from_avg_point_to_center_wo', 'shortest_distance_to_face_wo', 'largest_face_area_wo']):
+                grouped_by_cif[row['CIF#']].append(row)
+
+        summary_rows = []
+        for cif_name, entries in grouped_by_cif.items():
+            def safe_min(key): return min(e[key] for e in entries if e[key] is not None)
+            def safe_max(key): return max(e[key] for e in entries if e[key] is not None)
+
+            summary_rows.append({
+                'CIF#': cif_name,
+                'max_volume_of_polyhedron': safe_max('volume_of_polyhedron_wo'),
+                'min_volume_of_polyhedron': safe_min('volume_of_polyhedron_wo'),
+                'max_distance_from_avg_point_to_center': safe_max('distance_from_avg_point_to_center_wo'),
+                'min_distance_from_avg_point_to_center': safe_min('distance_from_avg_point_to_center_wo'),
+                'max_shortest_distance_to_face': safe_max('shortest_distance_to_face_wo'),
+                'min_shortest_distance_to_face': safe_min('shortest_distance_to_face_wo'),
+                'max_largest_face_area': safe_max('largest_face_area_wo'),
+                'min_largest_face_area': safe_min('largest_face_area_wo')
+            })
+
+        df_summary = pd.DataFrame(summary_rows)
+        summary_output_filename = f"{os.path.basename(os.path.normpath(selected_dir))}_RE_polyhedra_summary.csv"
+        summary_output_path = os.path.join(base_dir, summary_output_filename)
+        df_summary.to_csv(summary_output_path, index=False)
 
     print(f"Total time: {round(time.time()-t0, 1)} seconds")
