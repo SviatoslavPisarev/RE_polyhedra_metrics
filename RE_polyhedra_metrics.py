@@ -157,22 +157,33 @@ def get_formula(points_wd, CN, site_symbol_map):
         formula += f"{e}{'' if c==1 else c}"
     return formula
 
-def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map, cif_path):
+def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map, cif_path, delta=0.01):
     
-    v = sorted(v, key=lambda x: x[1])
-    i_same_as_center = min([100, *[i for i in range(len(v)) if site_symbol_map[v[i][0]] == site_symbol_map[k]]])
-    points_wd = [[p[3], p[1], p[0]] for p in v if site_symbol_map[p[0]] not in RE_ELEMENTS]
+    points_wd = [[p[3], p[1], p[0]] for p in v if site_symbol_map[p[0]]]
 
     # sort
-    points_wd = sorted(points_wd, key=lambda x: x[1])[:22]
+    points_wd = sorted(points_wd, key=lambda x: x[1])
     distances = np.array([p[1] for p in points_wd])
     distances /= distances.min()
 
     gaps = np.array([distances[i] - distances[i-1] for i in range(1, len(distances))])
     ind_gaps = np.argsort(gaps)
     inner_gap_index = np.array(ind_gaps[::-1])
-    inner_gap_index = inner_gap_index[inner_gap_index <= i_same_as_center]
-    outer_CN_wo_center_type = int(inner_gap_index[0]) + 1 if len(inner_gap_index) else 0
+    inner_gap_index += 1
+    inner_gap_index = inner_gap_index[inner_gap_index>=4]
+    inner_gap_index = inner_gap_index[inner_gap_index<=20]
+
+    same_elemns = [i for i in range(len(points_wd)) if site_symbol_map[points_wd[i][-1]] == site_symbol_map[k]]
+    if len(same_elemns):
+        same_elemns = min(same_elemns)
+        print(k, same_elemns, inner_gap_index)
+        inner_gap_index = inner_gap_index[inner_gap_index <= same_elemns]
+        if not len(inner_gap_index):
+            outer_CN_wo_center_type = 0   
+        else: 
+            outer_CN_wo_center_type = int(inner_gap_index.max()) 
+    else:
+        outer_CN_wo_center_type = int(inner_gap_index[0])
 
     error_capture = StringIO()
     with contextlib.redirect_stdout(error_capture), contextlib.redirect_stderr(error_capture):
