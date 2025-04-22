@@ -18,7 +18,7 @@ from multiprocessing import Pool, cpu_count
 RE_ELEMENTS = {"Y", "La", "Ce", "Pr", "Nd", "Sm", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Lu"}
 
 def polygon_name(triangles):
-    mapping = {
+    mapping_polyhedra_names = {
         1: 'triangle', 
         2: 'quadrilateral', 
         3: 'pentagon', 
@@ -26,7 +26,7 @@ def polygon_name(triangles):
         5: 'heptagon', 
         6: 'octagon'
     }
-    return mapping.get(triangles, f"{triangles+2}-gon")
+    return mapping_polyhedra_names.get(triangles, f"{triangles+2}-gon")
 
 def polyhedron_metrics(center, points_wd):
     points = [[p][0][0] for p in points_wd]
@@ -164,7 +164,7 @@ def d_by_dmin_CN_wo_center_type(k, v, center, site_symbol_map, cif_path):
     points_wd = [[p[3], p[1], p[0]] for p in v if site_symbol_map[p[0]] not in RE_ELEMENTS]
 
     # sort
-    points_wd = sorted(points_wd, key=lambda x: x[1])[:20]
+    points_wd = sorted(points_wd, key=lambda x: x[1])[:22]
     distances = np.array([p[1] for p in points_wd])
     distances /= distances.min()
 
@@ -224,7 +224,7 @@ def d_by_dmin(k, v, center, site_symbol_map, cif_path):
     inner_CN = None
     
     # sort
-    points_wd = sorted(points_wd, key=lambda x: x[1])[:20]
+    points_wd = sorted(points_wd, key=lambda x: x[1])[:22]
     distances = np.array([p[1] for p in points_wd])
     distances /= distances.min()
 
@@ -298,6 +298,7 @@ def find_cenvs_s(cif_path):
     try:
         results = []
         cif = Cif(cif_path, is_formatted=True)
+        formula = cif.formula
         # label, symbol, mult, Wyckoff_symbol, x, y, z, occ
         error_capture = StringIO()
         with contextlib.redirect_stdout(error_capture):
@@ -323,6 +324,7 @@ def find_cenvs_s(cif_path):
             
                 if data is not None:
                     data['CIF#'] = cif_path.split(os.sep)[-1][:-4]
+                    data['Formula'] = formula
                     data['central_atom'] = central_atom
                     data['Wyckoff'] = wyckoff
                     # data['CN_without_neigh_same_as_center'] = outer_CN_wo_center_type
@@ -424,6 +426,7 @@ if __name__ == "__main__":
 
             summary_rows.append({
                 'CIF#': cif_name,
+                'Formula': entries[0].get('Formula'),
                 'max_volume_of_polyhedron': safe_max('volume_of_polyhedron_wo'),
                 'min_volume_of_polyhedron': safe_min('volume_of_polyhedron_wo'),
                 'max_distance_from_avg_point_to_center': safe_max('distance_from_avg_point_to_center_wo'),
@@ -435,8 +438,40 @@ if __name__ == "__main__":
             })
 
         df_summary = pd.DataFrame(summary_rows)
+        summary_output_filename = f"{os.path.basename(os.path.normpath(selected_dir))}_RE_polyhedra_summary_wo.csv"
+        summary_output_path = os.path.join(base_dir, summary_output_filename)
+        df_summary.to_csv(summary_output_path, index=False)
+
+
+    # Create summary with min/max values per CIF# from data
+    if results:
+        grouped_by_cif = defaultdict(list)
+        for row in results:
+            if all(key in row for key in ['volume_of_polyhedron', 'distance_from_avg_point_to_center', 'shortest_distance_to_face', 'largest_face_area']):
+                grouped_by_cif[row['CIF#']].append(row)
+
+        summary_rows = []
+        for cif_name, entries in grouped_by_cif.items():
+            def safe_min(key): return min(e[key] for e in entries if e[key] is not None)
+            def safe_max(key): return max(e[key] for e in entries if e[key] is not None)
+
+            summary_rows.append({
+                'CIF#': cif_name,
+                'Formula': entries[0].get('Formula'),
+                'max_volume_of_polyhedron': safe_max('volume_of_polyhedron'),
+                'min_volume_of_polyhedron': safe_min('volume_of_polyhedron'),
+                'max_distance_from_avg_point_to_center': safe_max('distance_from_avg_point_to_center'),
+                'min_distance_from_avg_point_to_center': safe_min('distance_from_avg_point_to_center'),
+                'max_shortest_distance_to_face': safe_max('shortest_distance_to_face'),
+                'min_shortest_distance_to_face': safe_min('shortest_distance_to_face'),
+                'max_largest_face_area': safe_max('largest_face_area'),
+                'min_largest_face_area': safe_min('largest_face_area')
+            })
+
+        df_summary = pd.DataFrame(summary_rows)
         summary_output_filename = f"{os.path.basename(os.path.normpath(selected_dir))}_RE_polyhedra_summary.csv"
         summary_output_path = os.path.join(base_dir, summary_output_filename)
         df_summary.to_csv(summary_output_path, index=False)
 
-    print(f"Total time: {round(time.time()-t0, 1)} seconds")
+
+    print(f"Elapsed time: {round(time.time()-t0, 1)} seconds")
